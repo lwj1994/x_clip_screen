@@ -5,15 +5,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="XScreenCapture"
 QQ_PATH="${QQ_APP_PATH:-/Applications/QQ.app}"
-ARCH="host"
+ARCH="arm64"
 SIGNING_IDENTITY="${XSCREEN_CAPTURE_SIGNING_IDENTITY:--}"
 
 usage() {
   cat <<'EOF'
-用法：scripts/build.sh [QQ.app 路径] [--qq-app 路径] [--arch host|arm64|x86_64|universal] [--sign 签名身份]
+用法：scripts/build.sh [QQ.app 路径] [--qq-app 路径] [--arch arm64] [--sign 签名身份]
 
 默认读取 QQ_APP_PATH，未设置时读取 /Applications/QQ.app。
-默认构建当前 Mac 架构，--arch universal 同时构建 Apple Silicon 和 Intel。
+仅构建 Apple Silicon（M 系列芯片）的 arm64 版本，包含所有随包依赖。
 --sign 签署宿主；也可通过 XSCREEN_CAPTURE_SIGNING_IDENTITY 指定，默认 - 为 ad-hoc。
 本机更新应持续使用同一有效签名身份及 bundle ID，避免屏幕录制授权因二进制哈希变化而失配。
 成功产物：build/XScreenCapture.app。仅复制并重新签名副本，不修改 QQ.app。
@@ -38,12 +38,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(uname -s)" == Darwin ]] || { echo "错误：构建需要 macOS。" >&2; exit 1; }
-case "$ARCH" in
-  host) ARCH="$(uname -m)"; ARCH_FLAGS=(-arch "$ARCH"); BUILD_ARCHS=("$ARCH") ;;
-  arm64|x86_64) ARCH_FLAGS=(-arch "$ARCH"); BUILD_ARCHS=("$ARCH") ;;
-  universal) ARCH_FLAGS=(-arch arm64 -arch x86_64); BUILD_ARCHS=(arm64 x86_64) ;;
-  *) echo "错误：不支持的架构 $ARCH。" >&2; exit 2 ;;
-esac
+[[ "$ARCH" == arm64 ]] || { echo "错误：仅支持 Apple Silicon 架构 arm64，不支持 ${ARCH}。" >&2; exit 2; }
 for tool in xcrun python3 codesign ditto; do
   command -v "$tool" >/dev/null || { echo "错误：缺少 $tool，请先配置 Xcode Command Line Tools。" >&2; exit 1; }
 done
@@ -57,6 +52,10 @@ FRAMEWORKS=(CocoaLumberjack AFNetworking JietuFramework)
 for framework in "${FRAMEWORKS[@]}"; do
   [[ -f "$SOURCE_FRAMEWORKS/$framework.framework/$framework" ]] || {
     echo "错误：当前 QQ 缺少 $framework.framework；该 QQ 版本的截图组件布局可能已改变。" >&2
+    exit 1
+  }
+  xcrun lipo "$SOURCE_FRAMEWORKS/$framework.framework/$framework" -verify_arch arm64 || {
+    echo "错误：$framework.framework 缺少 arm64，无法用于 Apple Silicon 构建。" >&2
     exit 1
   }
 done
@@ -92,23 +91,14 @@ fi
 
 printf '正在编译 PermissionFlow 权限引导桥接（%s）……\n' "$ARCH"
 SWIFT_SCRATCH="$ROOT/build/swiftpm"
-BRIDGE_SLICES=()
-PERMISSION_RESOURCES=""
-for bridge_arch in "${BUILD_ARCHS[@]}"; do
-  SWIFT_OPTIONS=(--package-path "$ROOT" --scratch-path "$SWIFT_SCRATCH" \
-    -c release --product XClipPermissionBridge --triple "$bridge_arch-apple-macosx13.0" \
-    --force-resolved-versions)
-  xcrun swift build "${SWIFT_OPTIONS[@]}"
-  SWIFT_BIN="$(xcrun swift build "${SWIFT_OPTIONS[@]}" --show-bin-path)"
-  BRIDGE_SLICES+=("$SWIFT_BIN/libXClipPermissionBridge.dylib")
-  PERMISSION_RESOURCES="$SWIFT_BIN/PermissionFlow_PermissionFlow.bundle"
-done
+SWIFT_OPTIONS=(--package-path "$ROOT" --scratch-path "$SWIFT_SCRATCH" \
+  -c release --product XClipPermissionBridge --triple arm64-apple-macosx13.0 \
+  --force-resolved-versions)
+xcrun swift build "${SWIFT_OPTIONS[@]}"
+SWIFT_BIN="$(xcrun swift build "${SWIFT_OPTIONS[@]}" --show-bin-path)"
+PERMISSION_RESOURCES="$SWIFT_BIN/PermissionFlow_PermissionFlow.bundle"
 BRIDGE="$APP/Contents/Frameworks/libXClipPermissionBridge.dylib"
-if [[ ${#BRIDGE_SLICES[@]} -eq 1 ]]; then
-  cp "${BRIDGE_SLICES[0]}" "$BRIDGE"
-else
-  xcrun lipo -create "${BRIDGE_SLICES[@]}" -output "$BRIDGE"
-fi
+cp "$SWIFT_BIN/libXClipPermissionBridge.dylib" "$BRIDGE"
 xcrun install_name_tool -id '@rpath/libXClipPermissionBridge.dylib' "$BRIDGE"
 # SwiftPM 会加入当前 Xcode 工具链的 rpath；发布副本只使用系统 Swift runtime。
 python3 - "$BRIDGE" <<'PY'
@@ -133,11 +123,18 @@ for framework in "${FRAMEWORKS[@]}"; do
   # ditto 保留版本化 framework 的符号链接；不继承 QQ 的扩展属性或隔离标记。
   ditto --noextattr --norsrc --noqtn \
     "$SOURCE_FRAMEWORKS/$framework.framework" "$APP/Contents/Frameworks/$framework.framework"
+  # Resolve the versioned executable so thinning preserves framework symlinks.
+  FRAMEWORK_BINARY="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' \
+    "$APP/Contents/Frameworks/$framework.framework/$framework")"
+  if [[ "$(xcrun lipo -archs "$FRAMEWORK_BINARY")" != arm64 ]]; then
+    xcrun lipo "$FRAMEWORK_BINARY" -thin arm64 -output "$STAGING/$framework.arm64"
+    mv "$STAGING/$framework.arm64" "$FRAMEWORK_BINARY"
+  fi
   codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$framework.framework"
 done
 
 printf '正在编译 %s（%s）……\n' "$APP_NAME" "$ARCH"
-xcrun clang "${ARCH_FLAGS[@]}" -fobjc-arc -fmodules -O2 -Wall -Wextra \
+xcrun clang -arch arm64 -fobjc-arc -fmodules -O2 -Wall -Wextra \
   -mmacosx-version-min=13.0 \
   -framework Cocoa -framework Carbon -framework ApplicationServices -framework UniformTypeIdentifiers \
   -Wl,-rpath,@executable_path/../Frameworks \

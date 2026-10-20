@@ -91,7 +91,7 @@ def write_manifest(app, qq_app):
     manifest = {
         "schema_version": 1,
         "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "note": "组件仅从本机 QQ 提取；副本经过 ad-hoc 签名，源文件未修改。此记录不表示腾讯授权再分发。",
+        "note": "组件仅从本机 QQ 提取；副本仅保留 arm64 并经过 ad-hoc 签名，源文件未修改。此记录不表示腾讯授权再分发。",
         "source_qq": bundle_identity(qq_app),
         "source_plugin": bundle_identity(plugin),
         "components": components,
@@ -136,8 +136,8 @@ def expand_loader_path(value, loader, executable):
 
 def verify_dependencies(app, executable):
     wanted_archs = architectures(executable)
-    if not wanted_archs or not wanted_archs.issubset({"arm64", "x86_64"}):
-        raise VerificationError(f"宿主架构异常：{wanted_archs}")
+    if wanted_archs != {"arm64"}:
+        raise VerificationError(f"宿主必须仅包含 arm64：实际为 {sorted(wanted_archs)}")
     binaries = []
     for path in app.rglob("*"):
         if path.is_symlink():
@@ -156,8 +156,8 @@ def verify_dependencies(app, executable):
     binary_set = set(binaries)
     for binary in binaries:
         available = architectures(binary)
-        if not wanted_archs.issubset(available):
-            raise VerificationError(f"{binary.name} 缺少架构：{sorted(wanted_archs - available)}")
+        if available != wanted_archs:
+            raise VerificationError(f"{binary.name} 必须仅包含 arm64：实际为 {sorted(available)}")
         for arch in sorted(wanted_archs):
             inherited = [expand_loader_path(value, executable, executable)
                          for value in rpaths(executable, arch)]
