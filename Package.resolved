@@ -1,6 +1,15 @@
 {
-  "originHash" : "5dc58a98af9477d8c2dd8890d981984224ea2885c567793e94460a88bf64cdaa",
+  "originHash" : "07ba9751e77cb3cc7b0563fd2117d13cdf8837bfad3052787368a21bdbd1b987",
   "pins" : [
+    {
+      "identity" : "apple_view_model",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/lwj1994/apple_view_model.git",
+      "state" : {
+        "revision" : "138305985258167c7eab2730cdcf99f0bb570385",
+        "version" : "0.13.0"
+      }
+    },
     {
       "identity" : "permissionflow",
       "kind" : "remoteSourceControl",
@@ -8,6 +17,15 @@
       "state" : {
         "revision" : "cb96db4bfd2342e8d8c56f2a7d51ca65b8aed6e2",
         "version" : "2.11.3"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax.git",
+      "state" : {
+        "revision" : "050f1a346fbbac0ca2cfb15a95274f7bd1cf0ccf",
+        "version" : "604.0.0"
       }
     }
   ],

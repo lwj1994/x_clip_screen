@@ -1,5 +1,5 @@
 #import <AppKit/AppKit.h>
-#import "../Sources/XClip/ToolbarIcons.h"
+#import "../Sources/XClipEngine/ToolbarIcons.h"
 
 static void Text(NSString *text, NSPoint point, CGFloat size, NSColor *color, BOOL bold) {
     [text drawAtPoint:point withAttributes:@{

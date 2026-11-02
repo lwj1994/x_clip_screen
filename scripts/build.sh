@@ -59,8 +59,8 @@ for framework in "${FRAMEWORKS[@]}"; do
     exit 1
   }
 done
-[[ -f "$ROOT/Sources/XClip/main.m" && -f "$ROOT/Resources/Info.plist" ]] || {
-  echo "错误：缺少 Sources/XClip/main.m 或 Resources/Info.plist。" >&2; exit 1;
+[[ -f "$ROOT/Sources/XScreenCapture/main.swift" && -f "$ROOT/Resources/Info.plist" ]] || {
+  echo "错误：缺少 Sources/XScreenCapture/main.swift 或 Resources/Info.plist。" >&2; exit 1;
 }
 
 mkdir -p "$ROOT/build"
@@ -89,29 +89,31 @@ if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
   cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
-printf '正在编译 PermissionFlow 权限引导桥接（%s）……\n' "$ARCH"
+printf '正在编译 %s 与 PermissionFlow 权限引导桥接（%s）……\n' "$APP_NAME" "$ARCH"
 SWIFT_SCRATCH="$ROOT/build/swiftpm"
 SWIFT_OPTIONS=(--package-path "$ROOT" --scratch-path "$SWIFT_SCRATCH" \
-  -c release --product XClipPermissionBridge --triple arm64-apple-macosx13.0 \
-  --force-resolved-versions)
-xcrun swift build "${SWIFT_OPTIONS[@]}"
+  -c release --triple arm64-apple-macosx13.0 --force-resolved-versions)
+xcrun swift build "${SWIFT_OPTIONS[@]}" --product XClipPermissionBridge
+xcrun swift build "${SWIFT_OPTIONS[@]}" --product "$APP_NAME"
 SWIFT_BIN="$(xcrun swift build "${SWIFT_OPTIONS[@]}" --show-bin-path)"
 PERMISSION_RESOURCES="$SWIFT_BIN/PermissionFlow_PermissionFlow.bundle"
 BRIDGE="$APP/Contents/Frameworks/libXClipPermissionBridge.dylib"
 cp "$SWIFT_BIN/libXClipPermissionBridge.dylib" "$BRIDGE"
 xcrun install_name_tool -id '@rpath/libXClipPermissionBridge.dylib' "$BRIDGE"
+HOST="$APP/Contents/MacOS/$APP_NAME"
+cp "$SWIFT_BIN/$APP_NAME" "$HOST"
 # SwiftPM 会加入当前 Xcode 工具链的 rpath；发布副本只使用系统 Swift runtime。
-python3 - "$BRIDGE" <<'PY'
+python3 - "$BRIDGE" "$HOST" <<'PY'
 import re
 import subprocess
 import sys
 
-binary = sys.argv[1]
-output = subprocess.check_output(["/usr/bin/otool", "-l", binary], text=True)
-rpaths = re.findall(r"\bcmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset \d+\)", output)
-for path in sorted(set(rpaths)):
-    if path.startswith("/") and not path.startswith(("/usr/lib/", "/System/Library/")):
-        subprocess.run(["/usr/bin/xcrun", "install_name_tool", "-delete_rpath", path, binary], check=True)
+for binary in sys.argv[1:]:
+    output = subprocess.check_output(["/usr/bin/otool", "-l", binary], text=True)
+    rpaths = re.findall(r"\bcmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset \d+\)", output)
+    for path in sorted(set(rpaths)):
+        if path.startswith("/") and not path.startswith(("/usr/lib/", "/System/Library/")):
+            subprocess.run(["/usr/bin/xcrun", "install_name_tool", "-delete_rpath", path, binary], check=True)
 PY
 ditto --noextattr --norsrc --noqtn "$PERMISSION_RESOURCES" \
   "$APP/Contents/Resources/PermissionFlow_PermissionFlow.bundle"
@@ -132,13 +134,6 @@ for framework in "${FRAMEWORKS[@]}"; do
   fi
   codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$framework.framework"
 done
-
-printf '正在编译 %s（%s）……\n' "$APP_NAME" "$ARCH"
-xcrun clang -arch arm64 -fobjc-arc -fmodules -O2 -Wall -Wextra \
-  -mmacosx-version-min=13.0 \
-  -framework Cocoa -framework Carbon -framework ApplicationServices -framework UniformTypeIdentifiers \
-  -Wl,-rpath,@executable_path/../Frameworks \
-  "$ROOT/Sources/XClip/"*.m -o "$APP/Contents/MacOS/$APP_NAME"
 
 # manifest 收录原始 QQ / 插件 executable 及已签名的 framework 副本。
 # 宿主最终签名后其 executable 会改变，因此不在自身的资源 manifest 中记录宿主哈希。

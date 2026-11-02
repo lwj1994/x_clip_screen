@@ -1,6 +1,5 @@
 #import "CaptureAppearance.h"
 #import <objc/runtime.h>
-#import <math.h>
 
 // ABI 和状态机来自 analysis/framework-selection-metadata.txt 与 ARM64 反汇编。
 // 用类型明确的 ObjC 消息保留两种 CPU 架构对 CGRect 返回值的正确调用约定。
@@ -57,14 +56,8 @@ NSColor *XCSelectionBorderColor(void) {
                               blue:(rgb & 255) / 255.0 alpha:1];
 }
 
-void XCSetSelectionBorderColor(NSColor *color) {
-    NSColor *rgb = [color colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-    if (!rgb) return;
-    unsigned int red = (unsigned int)lround(fmax(0, fmin(1, rgb.redComponent)) * 255);
-    unsigned int green = (unsigned int)lround(fmax(0, fmin(1, rgb.greenComponent)) * 255);
-    unsigned int blue = (unsigned int)lround(fmax(0, fmin(1, rgb.blueComponent)) * 255);
-    [NSUserDefaults.standardUserDefaults setObject:[NSString stringWithFormat:@"#%02X%02X%02X", red, green, blue]
-                                          forKey:XCSelectionBorderColorDefaultsKey];
+void XCRefreshSelectionBorderColor(void) {
+    NSColor *rgb = XCSelectionBorderColor();
     // 颜色设置通常在截图前使用；也允许活跃选区立即更新。
     for (NSWindowController<XCCaptureAppearanceABI> *controller in XCCaptureControllers.allObjects) {
         NSView<XCCaptureAppearanceABI> *view = [[controller captureViewController] captureView];
@@ -86,13 +79,6 @@ static void XCBecomeActive(NSWindowController<XCCaptureAppearanceABI> *controlle
     controller.window.animationBehavior = NSWindowAnimationBehaviorNone;
     [XCCaptureControllers addObject:controller];
     XCOriginalBecomeActive(controller, selector);
-}
-
-static id XCManualWindowInfoAtPosition(id view, SEL selector, NSPoint point) {
-    (void)view; (void)selector; (void)point;
-    // mouseMoved 和未拖动的 mouseDown 均通过此入口查询窗口。
-    // 返回 nil 禁用自动窗口命中，拖拽生成区域的原分支不依赖这个入口。
-    return nil;
 }
 
 static void XCResetSelection(void) {
@@ -149,7 +135,7 @@ static void XCCaptureMouseDown(NSView<XCCaptureAppearanceABI> *view, SEL selecto
 static void XCConfirmSelectedItem(NSView<XCCaptureAppearanceABI> *view, SEL selector) {
     if (NSIsEmptyRect([view selectedRect])) {
         // 原 mouseDown 即使命中窗口为 nil 仍设置 type=1 并请求确认。
-        // 单击或零宽/零高拖动回到初始状态，不创建工具栏或锁定编辑。
+        // 未命中窗口的单击或零宽/零高拖动回到初始状态，不创建工具栏或锁定编辑。
         XCResetSelection();
         return;
     }
@@ -172,7 +158,6 @@ BOOL XCInstallCaptureAppearance(NSError **error) {
         @[@"JTCaptureWindowController", @"becomeActive", @"v16@0:8"],
         @[@"JTCaptureWindowController", @"captureViewController", @"@16@0:8"],
         @[@"JTCaptureView", @"mouseDown:", @"v24@0:8@16"],
-        @[@"JTCaptureView", @"windowInfoAtPosition:", @"@32@0:8{CGPoint=dd}16"],
         @[@"JTCaptureView", @"confirmSelectedItem", @"v16@0:8"],
         @[@"JTCaptureView", @"selectedItem", @"@16@0:8"],
         @[@"JTCaptureView", @"selectedRect", @"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8"],
@@ -217,8 +202,6 @@ BOOL XCInstallCaptureAppearance(NSError **error) {
         NSClassFromString(@"JTCaptureWindowController"), NSSelectorFromString(@"becomeActive")), (IMP)XCBecomeActive);
     XCOriginalCaptureMouseDown = (void *)method_setImplementation(class_getInstanceMethod(
         NSClassFromString(@"JTCaptureView"), @selector(mouseDown:)), (IMP)XCCaptureMouseDown);
-    method_setImplementation(class_getInstanceMethod(NSClassFromString(@"JTCaptureView"),
-        NSSelectorFromString(@"windowInfoAtPosition:")), (IMP)XCManualWindowInfoAtPosition);
     XCOriginalConfirmSelectedItem = (void *)method_setImplementation(class_getInstanceMethod(
         NSClassFromString(@"JTCaptureView"), NSSelectorFromString(@"confirmSelectedItem")), (IMP)XCConfirmSelectedItem);
     return YES;

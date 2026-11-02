@@ -22,7 +22,8 @@
 @interface XCCaptureEngine : NSObject
 @property(nonatomic, readonly) BOOL capturing;
 - (BOOL)loadWithError:(NSError **)error;
-- (BOOL)startWithDelegate:(id)delegate;
+/// 原框架以 NSException 报告的异常转换为 NSError，Swift 宿主可直接 try。
+- (BOOL)startWithDelegate:(id)delegate error:(NSError **)error;
 - (void)cancel;
 - (NSDictionary *)diagnostics;
 @end

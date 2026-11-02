@@ -106,6 +106,16 @@ static void XCSetupButtons(id toolbar, SEL selector) {
 
 - (BOOL)capturing { return self.loaded && _isCapturing(); }
 
+- (BOOL)startWithDelegate:(id)delegate error:(NSError **)error {
+    @try {
+        if ([self startWithDelegate:delegate]) return YES;
+        return [self fail:@"截图未能启动，请稍后重试。" error:error];
+    } @catch (NSException *exception) {
+        [self cancel];
+        return [self fail:[NSString stringWithFormat:@"截图引擎异常：%@", exception.reason] error:error];
+    }
+}
+
 - (BOOL)startWithDelegate:(id)delegate {
     if (!self.loaded || self.capturing) return NO;
     id<XClipRecoveredCaptureABI> setting = [(Class<XClipRecoveredCaptureABI>)NSClassFromString(@"JTCaptureSetting") sharedInstance];
