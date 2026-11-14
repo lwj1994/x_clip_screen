@@ -41,6 +41,27 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def macho_files(app):
+    """列出 bundle 内所有真实 Mach-O 文件（跳过符号链接），按路径排序。"""
+    binaries = []
+    for path in sorted(app.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open("rb") as stream:
+            if stream.read(4) in MACHO_MAGICS:
+                binaries.append(path.resolve())
+    return binaries
+
+
+def codesign_details(binary):
+    """codesign -dvvv 把签名详情写到 stderr，这里合并两路输出。"""
+    result = subprocess.run(["/usr/bin/codesign", "-dvvv", str(binary)],
+                            text=True, capture_output=True)
+    if result.returncode:
+        raise VerificationError(f"无法读取签名详情：{binary}\n{result.stderr.strip()}")
+    return result.stdout + result.stderr
+
+
 def inside(path, parent):
     try:
         path.resolve().relative_to(parent.resolve())
@@ -91,7 +112,7 @@ def write_manifest(app, qq_app):
     manifest = {
         "schema_version": 1,
         "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "note": "组件仅从本机 QQ 提取；副本仅保留 arm64 并经过 ad-hoc 签名，源文件未修改。此记录不表示腾讯授权再分发。",
+        "note": "组件仅从本机 QQ 提取；副本仅保留 arm64 并用构建时的签名身份重签，源文件未修改。此记录不表示腾讯授权再分发。",
         "source_qq": bundle_identity(qq_app),
         "source_plugin": bundle_identity(plugin),
         "components": components,
@@ -143,11 +164,7 @@ def verify_dependencies(app, executable):
         if path.is_symlink():
             if not path.exists() or not inside(path, app):
                 raise VerificationError(f"bundle 含悬空或越界符号链接：{path}")
-            continue
-        if path.is_file():
-            with path.open("rb") as stream:
-                if stream.read(4) in MACHO_MAGICS:
-                    binaries.append(path.resolve())
+    binaries = macho_files(app)
     framework_dir = app / "Contents/Frameworks"
     actual = {path.name for path in framework_dir.iterdir()}
     expected = {f"{name}.framework" for name in FRAMEWORKS} | {BRIDGE_DYLIB}
@@ -223,11 +240,36 @@ def verify_manifest(app, qq_app):
         print("副本 SHA-256 校验通过；未指定 --qq-app，跳过本机源文件比对")
 
 
+def verify_distribution(app):
+    """公证前置条件：全部 Mach-O 必须使用 Developer ID、硬化运行时和安全时间戳。"""
+    for binary in macho_files(app):
+        details = codesign_details(binary)
+        if "Authority=Developer ID Application" not in details:
+            raise VerificationError(f"{binary.name} 未使用 Developer ID 证书签名。")
+        if "runtime" not in details.split("flags=", 1)[-1].split("\n", 1)[0]:
+            raise VerificationError(f"{binary.name} 未启用硬化运行时。")
+        if "Timestamp=" not in details:
+            raise VerificationError(f"{binary.name} 缺少安全时间戳。")
+    print("分发签名通过：Developer ID + 硬化运行时 + 安全时间戳")
+
+
+def verify_notarized(app):
+    run("/usr/bin/xcrun", "stapler", "validate", str(app))
+    result = subprocess.run(["/usr/sbin/spctl", "--assess", "--type", "execute",
+                             "--verbose=2", str(app)], text=True, capture_output=True)
+    if result.returncode:
+        raise VerificationError(f"Gatekeeper 拒绝该 App：{result.stdout.strip()}{result.stderr.strip()}")
+    print("公证票据通过：staple 有效且 Gatekeeper 接受")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path, help="待验证的 XScreenCapture.app")
     parser.add_argument("--qq-app", type=Path, help="同时校验该 QQ.app 的来源哈希")
     parser.add_argument("--write-manifest", action="store_true", help="在宿主签名前写入来源 manifest")
+    parser.add_argument("--distribution", action="store_true",
+                        help="要求全部 Mach-O 使用 Developer ID、硬化运行时与安全时间戳")
+    parser.add_argument("--notarized", action="store_true", help="要求已 staple 且通过 Gatekeeper")
     args = parser.parse_args()
     app = args.app.resolve()
     qq_app = args.qq_app.resolve() if args.qq_app else None
@@ -250,6 +292,10 @@ def main():
                 str(app / "Contents/Frameworks" / BRIDGE_DYLIB))
             run("/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app))
             print("codesign 严格校验通过")
+            if args.distribution:
+                verify_distribution(app)
+            if args.notarized:
+                verify_notarized(app)
     except (VerificationError, OSError, ValueError, KeyError, StopIteration) as error:
         print(f"验证失败：{error}", file=sys.stderr)
         return 1

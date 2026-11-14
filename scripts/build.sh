@@ -14,7 +14,9 @@ usage() {
 
 默认读取 QQ_APP_PATH，未设置时读取 /Applications/QQ.app。
 仅构建 Apple Silicon（M 系列芯片）的 arm64 版本，包含所有随包依赖。
---sign 签署宿主；也可通过 XSCREEN_CAPTURE_SIGNING_IDENTITY 指定，默认 - 为 ad-hoc。
+--sign 签名身份；也可通过 XSCREEN_CAPTURE_SIGNING_IDENTITY 指定，默认 - 为 ad-hoc。
+  使用 Developer ID 身份时自动启用硬化运行时与安全时间戳，产物可送公证（见 scripts/distribute.sh）。
+  内嵌 framework / 桥接库与宿主使用同一身份和选项签名。
 本机更新应持续使用同一有效签名身份及 bundle ID，避免屏幕录制授权因二进制哈希变化而失配。
 成功产物：build/XScreenCapture.app。仅复制并重新签名副本，不修改 QQ.app。
 EOF
@@ -93,9 +95,15 @@ printf '正在编译 %s 与 PermissionFlow 权限引导桥接（%s）……\n' "
 SWIFT_SCRATCH="$ROOT/build/swiftpm"
 SWIFT_OPTIONS=(--package-path "$ROOT" --scratch-path "$SWIFT_SCRATCH" \
   -c release --triple arm64-apple-macosx13.0 --force-resolved-versions)
-xcrun swift build "${SWIFT_OPTIONS[@]}" --product XClipPermissionBridge
-xcrun swift build "${SWIFT_OPTIONS[@]}" --product "$APP_NAME"
+# 不带 --product 时 SwiftPM 一次构建根包全部产物（宿主 + 桥接 dylib，不含测试），只解析一遍依赖。
+# 注意 --product 是单值选项，重复传入只会构建最后一个，导致复制到旧的桥接库。
+xcrun swift build "${SWIFT_OPTIONS[@]}"
 SWIFT_BIN="$(xcrun swift build "${SWIFT_OPTIONS[@]}" --show-bin-path)"
+for product in libXClipPermissionBridge.dylib "$APP_NAME"; do
+  [[ -f "$SWIFT_BIN/$product" ]] || {
+    echo "错误：Swift 构建未产出 $product。" >&2; exit 1;
+  }
+done
 PERMISSION_RESOURCES="$SWIFT_BIN/PermissionFlow_PermissionFlow.bundle"
 BRIDGE="$APP/Contents/Frameworks/libXClipPermissionBridge.dylib"
 cp "$SWIFT_BIN/libXClipPermissionBridge.dylib" "$BRIDGE"
@@ -118,7 +126,6 @@ PY
 ditto --noextattr --norsrc --noqtn "$PERMISSION_RESOURCES" \
   "$APP/Contents/Resources/PermissionFlow_PermissionFlow.bundle"
 cp "$SWIFT_SCRATCH/checkouts/PermissionFlow/LICENSE" "$APP/Contents/Resources/PermissionFlow-LICENSE.txt"
-codesign --force --sign - --timestamp=none "$BRIDGE"
 
 printf '正在从本机 QQ 复制截图组件：%s\n' "$QQ_PATH"
 for framework in "${FRAMEWORKS[@]}"; do
@@ -132,13 +139,21 @@ for framework in "${FRAMEWORKS[@]}"; do
     xcrun lipo "$FRAMEWORK_BINARY" -thin arm64 -output "$STAGING/$framework.arm64"
     mv "$STAGING/$framework.arm64" "$FRAMEWORK_BINARY"
   fi
-  codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$framework.framework"
 done
+
+SIGN_ARGS=(--identity "$SIGNING_IDENTITY")
+if [[ -f "$ROOT/Resources/XScreenCapture.entitlements" ]]; then
+  SIGN_ARGS+=(--entitlements "$ROOT/Resources/XScreenCapture.entitlements")
+fi
+
+# 先签内嵌组件，再写 manifest；manifest 属于被封印的资源，最后重签宿主。
+printf '正在签名（%s）……\n' "$SIGNING_IDENTITY"
+"$ROOT/scripts/sign_app.sh" "$APP" "${SIGN_ARGS[@]}" --nested-only
 
 # manifest 收录原始 QQ / 插件 executable 及已签名的 framework 副本。
 # 宿主最终签名后其 executable 会改变，因此不在自身的资源 manifest 中记录宿主哈希。
 python3 "$ROOT/scripts/verify_bundle.py" "$APP" --write-manifest --qq-app "$QQ_PATH"
-codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$APP"
+"$ROOT/scripts/sign_app.sh" "$APP" "${SIGN_ARGS[@]}" --host-only
 python3 "$ROOT/scripts/verify_bundle.py" "$APP" --qq-app "$QQ_PATH"
 
 if [[ -e "$OUTPUT" ]]; then

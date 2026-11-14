@@ -2,7 +2,7 @@
 
 XScreenCapture is a macOS menu bar app built around screenshot frameworks extracted from **your locally installed QQ**. It provides an original AppKit host written in Swift with [AppleViewModel](https://github.com/lwj1994/apple_view_model), build scripts, and reverse-engineering notes. The QQ screenshot engine has not been reconstructed as complete source code. QQ binaries and toolbar images are extracted at build time and are not included in this repository.
 
-Current revision: **0.2.4, build 6**, bundle ID `milu.qqjietu`. The toolbar uses QQ's original button PNGs from the extracted framework's `ThemeResources/QQ-theme`, preserving their shapes, colors, and interaction-state images in the compact **432 × 48 pt** layout.
+Current revision: **0.2.5, build 7**, bundle ID `milu.qqjietu`. The toolbar uses QQ's original button PNGs from the extracted framework's `ThemeResources/QQ-theme`, preserving their shapes, colors, and interaction-state images in the compact **432 × 48 pt** layout. Distribution builds are signed with Developer ID, hardened runtime, and a secure timestamp, then notarized and stapled; `scripts/distribute.sh` produces a notarized DMG and an update archive.
 
 ## Build and launch
 
@@ -13,15 +13,19 @@ Requirements: an Apple Silicon (M-series) Mac running macOS 13+, an Xcode toolch
 ./scripts/build.sh
 open build/XScreenCapture.app
 
-# Keep using the same installed signing identity across rebuilds.
+# Build with the installed Developer ID identity: hardened runtime + secure timestamp
+# on every Mach-O, so the app can be notarized.
 ./scripts/build.sh --sign "Developer ID Application: Your Name (TEAMID)"
+
+# Full distribution: notarize the app, staple it, then sign and notarize a DMG.
+./scripts/distribute.sh --sign "Developer ID Application: Your Name (TEAMID)"
 
 # Optional environment configuration; --qq-app also accepts a QQ.app path.
 XSCREEN_CAPTURE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
   QQ_APP_PATH="/path/to/QQ.app" ./scripts/build.sh
 ```
 
-The output is `build/XScreenCapture.app`. The script copies and signs component copies without modifying QQ.app, and preserves the last successful output if a build fails. The host loads its bundled frameworks without launching QQ or the original plugin.
+The output is `build/XScreenCapture.app`. The script copies and signs component copies without modifying QQ.app, and preserves the last successful output if a build fails. The host loads its bundled frameworks without launching QQ or the original plugin. Every Mach-O inside the bundle — host, permission bridge, and the three QQ frameworks — is signed with the same identity and the same options (hardened runtime; secure timestamp when the identity is a Developer ID), because notarization rejects mixed or ad-hoc nested code. Ad-hoc builds keep working for local development but cannot be notarized.
 
 All builds use arm64 for the host and permission bridge, and strip other architecture slices from copied QQ frameworks before signing. `--arch arm64` is accepted explicitly; other architectures are rejected. The resulting app runs natively on Apple Silicon and does not include Intel code. Install the app by copying it to `~/Applications` or `/Applications`; building does not automatically replace an installed copy.
 
@@ -38,15 +42,21 @@ All builds use arm64 for the host and permission bridge, and strip other archite
 
 OCR, scrolling capture, and screen recording remain disabled. Normal mode retains the engine's cancellation behavior when the app loses foreground status, hides, or changes Spaces. The fixed 220 ms startup wait and screenshot-window transitions have been removed; capture latency has not been measured.
 
-Keep using the same signing identity when rebuilding an installed app. Nested component copies remain ad-hoc signed, and the app is not notarized. Switching signing identities or rebuilding an ad-hoc host can invalidate screen-recording authorization. If access remains unavailable after authorization, try removing the old permission entry, adding the installed app again, and choosing Quit & Reopen.
+Keep using the same signing identity when rebuilding an installed app. Nested component copies now use that identity as well, and Developer ID builds are notarized and stapled by `scripts/distribute.sh`; ad-hoc builds remain unnotarized. Switching signing identities or rebuilding an ad-hoc host can invalidate screen-recording authorization. If access remains unavailable after authorization, try removing the old permission entry, adding the installed app again, and choosing Quit & Reopen.
 
 ## Release
 
 ```sh
+# Notarized app + DMG only, no upload.
+./scripts/distribute.sh
+
+# Notarize, then publish both artifacts to GitHub Release v<version>.
 XSCREEN_CAPTURE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/release.sh
 ```
 
-`scripts/release.sh` reads the version from `Resources/Info.plist`, requires a clean, pushed `HEAD`, builds with the given Developer ID identity, and publishes `dist/XScreenCapture-<version>.app.zip` as GitHub Release `v<version>`. Pass `--notes-file` to supply release notes. The archive is not notarized; a browser download needs a Gatekeeper override on first launch, while in-app updates are downloaded without a quarantine flag.
+`scripts/distribute.sh` builds with the given Developer ID identity, checks the Developer ID/hardened-runtime/timestamp signature of every Mach-O, notarizes `XScreenCapture.app`, staples it, and writes two artifacts to `dist/`: `XScreenCapture-<version>.app.zip` (the stapled app, used by in-app updates) and `XScreenCapture-<version>.dmg` (signed, notarized, stapled, with an `Applications` shortcut). Notarization uses App Store Connect API credentials from `ASC_KEY_ID`, `ASC_PRIVATE_KEY_PATH`, and `ASC_ISSUER_ID`, or a `notarytool` profile passed with `--keychain-profile`. Rejection reasons are printed from the notary log, so a failure is diagnosable without leaving the script.
+
+`scripts/release.sh` reads the version from `Resources/Info.plist`, requires a clean, pushed `HEAD`, calls `distribute.sh`, and uploads both artifacts as GitHub Release `v<version>`. Pass `--notes-file` to supply release notes. A browser download of the DMG now passes Gatekeeper on first launch; the update archive is also stapled, so in-app updates verify offline after install.
 
 ## Verification
 
@@ -54,9 +64,14 @@ XSCREEN_CAPTURE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" 
 swift test --no-parallel
 python3 scripts/verify_bundle.py build/XScreenCapture.app --qq-app /Applications/QQ.app
 build/XScreenCapture.app/Contents/MacOS/XScreenCapture --self-test
+
+# Distribution artifacts additionally need Developer ID signing and a notary ticket.
+python3 scripts/verify_bundle.py build/XScreenCapture.app --qq-app /Applications/QQ.app \
+  --distribution --notarized
+xcrun stapler validate dist/XScreenCapture-<version>.dmg
 ```
 
-Bundle verification requires every Mach-O executable and library to contain only arm64, and rejects Intel or Universal components. Self-test checks framework loading and required interfaces; it does not take a screenshot. Original component versions and SHA-256 hashes are recorded in `Contents/Resources/component-manifest.json`. Recheck interfaces after a QQ update.
+Bundle verification requires every Mach-O executable and library to contain only arm64, and rejects Intel or Universal components. `--distribution` adds the notarization preconditions: Developer ID authority, hardened runtime, and a secure timestamp on every Mach-O. `--notarized` requires a valid stapled ticket and a Gatekeeper `spctl` assessment. Self-test checks framework loading and required interfaces; it does not take a screenshot. Original component versions and SHA-256 hashes are recorded in `Contents/Resources/component-manifest.json`. Recheck interfaces after a QQ update.
 
 For **0.2.4**, unit tests cover version comparison, release parsing, settings persistence, and real Carbon shortcut registration (conflict rollback, invalid input, persistence, recording pause/restore, and release on disposal). The signed build passed bundle verification and self-test. In UI-test mode, hovering and clicking during capture selected a whole window and showed the toolbar; completing that capture was not verified. A local release server upgraded a re-signed 0.2.3 copy to 0.2.4 in place and reopened it.
 
